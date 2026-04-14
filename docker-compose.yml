@@ -1,0 +1,109 @@
+# ═══════════════════════════════════════════════════════════
+#  Voice Insight Engine — Monorepo Docker Compose
+#  Orchestrates: backend + frontend + ollama
+# ═══════════════════════════════════════════════════════════
+
+services:
+
+  # ── Backend (FastAPI) ─────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vie-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - WHISPER_MODEL=${WHISPER_MODEL:-base}
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-cpu}
+      - DEFAULT_LLM_PROVIDER=${DEFAULT_LLM_PROVIDER:-ollama}
+      - DEFAULT_TRANSCRIPTION_PROVIDER=${DEFAULT_TRANSCRIPTION_PROVIDER:-local}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app          # live reload in dev
+      - whisper-cache:/root/.cache/whisper
+    depends_on:
+      ollama:
+        condition: service_started
+    networks:
+      - vie-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  # ── Frontend (Next.js) ────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: vie-frontend
+    ports:
+      - "3004:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - vie-net
+    restart: unless-stopped
+
+  # ── Ollama (local LLM runtime) ────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: vie-ollama
+    # No host port binding — backend reaches Ollama via internal network (http://ollama:11434).
+    # Expose only if you need direct host access (e.g. Ollama CLI / curl from host).
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - vie-net
+    # Uncomment for GPU support:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    restart: unless-stopped
+
+  # ── Ollama model bootstrapper ─────────────────────────────
+  ollama-init:
+    image: curlimages/curl:latest
+    container_name: vie-ollama-init
+    depends_on:
+      - ollama
+    networks:
+      - vie-net
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo 'Waiting for Ollama...'
+        sleep 8
+        curl -sf -X POST http://ollama:11434/api/pull \
+          -H 'Content-Type: application/json' \
+          -d "{\"name\": \"${OLLAMA_MODEL:-llama3.2}\"}"
+        echo 'Model ready.'
+    restart: "no"
+
+volumes:
+  ollama-data:
+    name: vie-ollama-data
+  whisper-cache:
+    name: vie-whisper-cache
+
+networks:
+  vie-net:
+    driver: bridge
+    name: vie-network
